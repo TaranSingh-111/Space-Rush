@@ -1,21 +1,56 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:ui';
 
+import 'package:flame/collisions.dart';
 import 'package:flame/components.dart';
+import 'package:flame/effects.dart';
+import 'package:space_rush/components/asteroid.dart';
+import 'package:space_rush/components/explosion.dart';
+import 'package:space_rush/components/pickup.dart';
+import 'package:space_rush/components/shield.dart';
 import 'package:space_rush/game.dart';
 
+import 'bomb.dart';
 import 'laser.dart';
 
-class Player extends SpriteComponent with HasGameReference<MyGame>{
+class Player extends SpriteAnimationComponent with HasGameReference<MyGame>, CollisionCallbacks{
   bool _isShooting = false;
   final double _fireCooldown = 0.2;
   double _elapsedFireTime = 0.0;
+  bool _isDestroyed = false;
+  final Random _random = Random();
+  late Timer _explosionTimer;
+  late Timer _laserPowerupTimer;
+  Shield? activeShield;
+  late String _color;
+
+  Player(){
+    _explosionTimer = Timer(
+      0.1,
+      onTick: _createRandomExplosion,
+      repeat: true,
+      autoStart: false,
+    );
+
+    _laserPowerupTimer = Timer(
+      10.0,
+      autoStart: false,
+    );
+  }
 
   @override
   FutureOr<void> onLoad() async{
-    sprite = await game.loadSprite('player_blue_on0.png');
+    _color = game.playerColors[game.playerColorIndex];
+    animation = await _loadAnimation();
 
     size *= 0.3;
+
+    add(RectangleHitbox.relative(
+      Vector2(0.6, 0.9),
+      parentSize: size,
+      anchor: Anchor.center,
+    ));
 
     return super.onLoad();
   }
@@ -23,6 +58,15 @@ class Player extends SpriteComponent with HasGameReference<MyGame>{
   @override
   void update(double dt){
     super.update(dt);
+
+    if(_isDestroyed) {
+      _explosionTimer.update(dt);
+      return;
+    }
+
+    if(_laserPowerupTimer.isRunning()){
+      _laserPowerupTimer.update(dt);
+    }
 
     position += game.joystick.relativeDelta.normalized() * 200 * dt;
 
@@ -35,6 +79,17 @@ class Player extends SpriteComponent with HasGameReference<MyGame>{
       _elapsedFireTime = 0.0;
     }
 
+  }
+
+  Future<SpriteAnimation> _loadAnimation() async{
+    return SpriteAnimation.spriteList(
+      [
+        await game.loadSprite('player_${_color}_on0.png'),
+        await game.loadSprite('player_${_color}_on1.png')
+      ],
+      stepTime: 0.1,
+      loop: true
+    );
   }
 
   void _handleScreenBounds(){
@@ -63,6 +118,102 @@ class Player extends SpriteComponent with HasGameReference<MyGame>{
   }
 
   void _fireLaser(){
+    game.audioManager.playSound('laser');
     game.add(Laser(position: position.clone() + Vector2(0, -size.y / 2)));
+
+    if (_laserPowerupTimer.isRunning()) {
+      game.add(
+        Laser(
+          position: position.clone() + Vector2(0, -size.y / 2),
+          angle: 15 * degrees2Radians,
+        ),
+      );
+      game.add(
+        Laser(
+          position: position.clone() + Vector2(0, -size.y / 2),
+          angle: -15 * degrees2Radians,
+        ),
+      );
+    }
   }
+
+  void _handleDestruction() async{
+    animation = SpriteAnimation.spriteList(
+    [
+      await game.loadSprite('player_${_color}_off.png',)
+    ],
+    stepTime: double.infinity,
+    );
+
+    add(ColorEffect(
+      const Color.fromRGBO(255, 255, 255, 1.0),
+      EffectController(duration: 0.0),
+    ));
+
+    add(OpacityEffect.fadeOut(
+      EffectController(duration: 3.0),
+      onComplete: () => _explosionTimer.stop()
+    ));
+
+    add(MoveEffect.by(
+      Vector2(0, 200),
+      EffectController(duration: 3.0)
+    ));
+
+    add(RemoveEffect(delay: 4.0, onComplete: game.playerDied));
+
+    _isDestroyed = true;
+
+    _explosionTimer.start();
+  }
+
+  void _createRandomExplosion(){
+    final Vector2 explosionPosition = Vector2(
+      position.x - size.x / 2 + _random.nextDouble() * size.x,
+      position.y - size.y / 2 + _random.nextDouble() * size.y,
+    );
+
+    final ExplosionType explosionType = _random.nextBool() ? ExplosionType.smoke : ExplosionType.fire;
+
+    final Explosion explosion  = Explosion(
+        position: explosionPosition,
+        explosionSize: size.x * 0.7,
+        explosionType: explosionType
+    );
+    game.add(explosion);
+  }
+
+  @override
+  void onCollision(Set<Vector2> intersectionPoints, PositionComponent other){
+    super.onCollision(intersectionPoints, other);
+
+    if(_isDestroyed) return;
+
+    if(other is Asteroid){
+      if(activeShield == null) _handleDestruction();
+    }
+    else if(other is Pickup){
+      game.audioManager.playSound('collect');
+      other.removeFromParent();
+      game.incrementScore(1);
+
+      switch(other.pickupType){
+        case PickupType.laser:
+          _laserPowerupTimer.start();
+          break;
+        case PickupType.bomb:
+          game.add(Bomb(position: position));
+          break;
+        case PickupType.shield:
+          if(activeShield != null){
+            remove(activeShield!);
+          }
+          activeShield = Shield();
+          add(activeShield!);
+          break;
+
+      }
+    }
+  }
+
 }
